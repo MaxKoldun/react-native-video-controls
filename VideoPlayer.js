@@ -12,9 +12,12 @@ import {
     Easing,
     Image,
     View,
-    Text
+    Text,
+    Dimensions
 } from 'react-native';
 import _ from 'lodash';
+
+const infelicity = 0.25;
 
 export default class VideoPlayer extends Component {
 
@@ -40,14 +43,15 @@ export default class VideoPlayer extends Component {
          * methods and listeners in this class
          */
         this.state = {
+            
             // Video
             resizeMode: this.props.resizeMode,
             paused: this.props.paused,
             muted: this.props.muted,
             volume: this.props.volume,
             rate: this.props.rate,
+            
             // Controls
-
             isFullscreen: this.props.resizeMode === 'cover' || false,
             showTimeRemaining: true,
             volumeTrackWidth: 0,
@@ -92,6 +96,7 @@ export default class VideoPlayer extends Component {
             onPause: this.props.onPause,
             onPlay: this.props.onPlay,
         };
+        
 
         /**
          * Functions used throughout the application
@@ -112,9 +117,11 @@ export default class VideoPlayer extends Component {
             seekPanResponder: PanResponder,
             controlTimeout: null,
             volumeWidth: 150,
-            iconOffset: 0,
-            seekWidth: 0,
+            iconOffset: 7,
+            seekerWidth: 0,
+            previousSeekerWidth: Math.round(Dimensions.get('window').width),
             ref: Video,
+            transition: false
         };
 
         /**
@@ -209,10 +216,17 @@ export default class VideoPlayer extends Component {
     _onProgress( data = {} ) {
         let state = this.state;
         state.currentTime = data.currentTime;
-
-        if ( ! state.seeking ) {
+        if ( ! state.seeking && state.paused === false ) {
             const position = this.calculateSeekerPosition();
+            console.log('_onProgress', position, state.currentTime);
             this.setSeekerPosition( position );
+        }
+
+        const time = this.calculateTimeFromSeekerPosition();
+        if ( Math.abs(state.duration - time) <= infelicity
+            && !state.loading ) {
+            state.paused = true;
+            this.events.onEnd();
         }
 
         if ( typeof this.props.onProgress === 'function' ) {
@@ -228,7 +242,38 @@ export default class VideoPlayer extends Component {
      * Either close the video or go to a
      * new page.
      */
-    _onEnd() {}
+
+    _onEnd() {
+        this.setControlTimeout();
+        this.seekTo(0);
+        this.setSeekerPosition(0);
+    }
+
+    _onExitFullscreen() {
+        this.events.onExitFullscreen();
+        const { previousSeekerWidth } = this.player;
+        this.player.transition = true;
+        if (previousSeekerWidth > 0 && this.state.seekerPosition !== 0) {
+            const position = this.calculateSeekerPosition(previousSeekerWidth);
+            this.setSeekerPosition(position);
+        }
+        this.player.transition = false;
+        this.player.previousSeekerWidth = this.player.seekerWidth;
+        console.log('exit', this.state);
+    }
+
+    _onEnterFullscreen() {
+        this.events.onEnterFullscreen();
+        const { previousSeekerWidth } = this.player;
+        this.player.transition = true;
+        if (previousSeekerWidth > 0 && this.state.seekerPosition !== 0) {
+            const position = this.calculateSeekerPosition(previousSeekerWidth);
+            this.setSeekerPosition(position);
+        }
+        this.player.transition = false;
+        this.player.previousSeekerWidth = this.player.seekerWidth;
+        console.log('enter', this.state);
+    }
 
     /**
      * Set the error state to true which then
@@ -264,8 +309,6 @@ export default class VideoPlayer extends Component {
 
         this.setState( state );
     }
-
-
 
     /**
     | -------------------------------------------------------
@@ -317,17 +360,9 @@ export default class VideoPlayer extends Component {
                 { toValue: 0 }
             ),
             Animated.timing(
-                this.animations.topControl.marginTop,
-                { toValue: -100 }
-            ),
-            Animated.timing(
                 this.animations.bottomControl.opacity,
                 { toValue: 0 }
-            ),
-            Animated.timing(
-                this.animations.bottomControl.marginBottom,
-                { toValue: -100 }
-            ),
+            )
         ]).start();
     }
 
@@ -343,17 +378,9 @@ export default class VideoPlayer extends Component {
                 { toValue: 1 }
             ),
             Animated.timing(
-                this.animations.topControl.marginTop,
-                { toValue: 0 }
-            ),
-            Animated.timing(
                 this.animations.bottomControl.opacity,
                 { toValue: 1 }
-            ),
-            Animated.timing(
-                this.animations.bottomControl.marginBottom,
-                { toValue: 0 }
-            ),
+            )
         ]).start();
     }
 
@@ -367,7 +394,7 @@ export default class VideoPlayer extends Component {
                     this.animations.loader.rotate,
                     {
                         toValue: this.animations.loader.MAX_VALUE,
-                        duration: 1500,
+                        duration: 100,
                         easing: Easing.linear,
                     }
                 ),
@@ -432,13 +459,14 @@ export default class VideoPlayer extends Component {
         }
 
         if (state.isFullscreen) {
-            typeof this.events.onEnterFullscreen === 'function' && this.events.onEnterFullscreen();
+            typeof this.events.onEnterFullscreen === 'function' && this._onEnterFullscreen();
         }
         else {
-            typeof this.events.onExitFullscreen === 'function' && this.events.onExitFullscreen();
+            typeof this.events.onExitFullscreen === 'function' && this._onExitFullscreen();
         }
-
-        this.setState( state );
+        console.log('_toggleFullscreen', state);
+        if (state.paused) this.setState({...state, paused: true });
+        else this.setState(state);
     }
 
     /**
@@ -489,7 +517,10 @@ export default class VideoPlayer extends Component {
      */
     calculateTime() {
         if ( this.state.showTimeRemaining ) {
-            const time = this.state.duration - this.state.currentTime;
+            const difference = Math.abs(this.state.duration - this.state.currentTime);
+            const time = difference <= infelicity
+                ? this.state.duration
+                : difference
             return `-${ this.formatTime( time ) }`;
         }
 
@@ -522,14 +553,14 @@ export default class VideoPlayer extends Component {
      *
      * @param {float} position position in px of seeker handle}
      */
-    setSeekerPosition( position = 0 ) {
+    setSeekerPosition( position = 0, isUpdateOffSet = false ) {
         let state = this.state;
         position = this.constrainToSeekerMinMax( position );
-
+        console.log('setSeekerPosition', position)
         state.seekerFillWidth = position;
         state.seekerPosition = position;
 
-        if ( ! state.seeking ) {
+        if ( ! state.seeking || isUpdateOffSet ) {
             state.seekerOffset = position
         };
 
@@ -545,11 +576,12 @@ export default class VideoPlayer extends Component {
      * @return {float} contrained position of seeker handle in px
      */
     constrainToSeekerMinMax( val = 0 ) {
+        const { seekerWidth, transition } = this.player;
+        
         if ( val <= 0 ) {
             return 0;
-        }
-        else if ( val >= this.player.seekerWidth ) {
-            return this.player.seekerWidth;
+        } else if ( val >= seekerWidth && transition === false ) {
+            return seekerWidth;
         }
         return val;
     }
@@ -560,9 +592,9 @@ export default class VideoPlayer extends Component {
      *
      * @return {float} position of seeker handle in px based on currentTime
      */
-    calculateSeekerPosition() {
+    calculateSeekerPosition(seekerWidth = this.player.seekerWidth) {
         const percent = this.state.currentTime / this.state.duration;
-        return this.player.seekerWidth * percent;
+        return seekerWidth * percent;
     }
 
     /**
@@ -646,7 +678,7 @@ export default class VideoPlayer extends Component {
      * @return {float} volume handle position in px based on volume
      */
     calculateVolumePositionFromVolume() {
-        return this.player.volumeWidth * this.state.volume;
+        return this.player.volumeWidth / this.state.volume;
     }
 
 
@@ -675,13 +707,14 @@ export default class VideoPlayer extends Component {
      * To allow basic playback management from the outside
      * we have to handle possible props changes to state changes
      */
-    componentWillReceiveProps(nextProps) {
-        if (this.state.paused !== nextProps.paused ) {
-            this.setState({
-                paused: nextProps.paused
-            })
-        }
-    }
+    // componentWillReceiveProps(nextProps) {
+    //     console.log('componentWillReceiveProps', nextProps.paused)
+    //     if (this.state.paused !== nextProps.paused ) {
+    //         this.setState({
+    //             paused: nextProps.paused
+    //         })
+    //     }
+    // }
 
     /**
      * Upon mounting, calculate the position of the volume
@@ -693,7 +726,7 @@ export default class VideoPlayer extends Component {
         this.setVolumePosition( position );
         state.volumeOffset = position;
         this.mounted = true;
-
+        
         this.setState( state );
     }
 
@@ -733,7 +766,8 @@ export default class VideoPlayer extends Component {
              */
             onPanResponderMove: ( evt, gestureState ) => {
                 const position = this.state.seekerOffset + gestureState.dx;
-                this.setSeekerPosition( position );
+                console.log('onPanResponderMove', position, this.player.seekerWidth);
+                this.setSeekerPosition( position ); 
             },
 
             /**
@@ -744,12 +778,23 @@ export default class VideoPlayer extends Component {
             onPanResponderRelease: ( evt, gestureState ) => {
                 const time = this.calculateTimeFromSeekerPosition();
                 let state = this.state;
-                if ( time >= state.duration && ! state.loading ) {
+                console.log('onPanResponderRelease', state.seekerPosition)
+                if ( Math.abs(state.duration - time) <= infelicity
+                    && ! state.loading ) {
                     state.paused = true;
                     this.events.onEnd();
+                    state.seeking = false;
                 } else {
+                    state.currentTime = time;
+                    console.log('time', time, state.seekerPosition)
                     this.seekTo( time );
                     this.setControlTimeout();
+                    const updateOffSet = true;
+                    if (state.seekerPosition < this.player.seekerWidth) {
+                        this.setSeekerPosition(state.seekerPosition, updateOffSet);
+                    } else {
+                        this.setSeekerPosition(state.seekerPosition);
+                    }
                     state.seeking = false;
                 }
                 this.setState( state );
@@ -984,7 +1029,9 @@ export default class VideoPlayer extends Component {
             <View style={ styles.seekbar.container }>
                 <View
                     style={ styles.seekbar.track }
-                    onLayout={ event => this.player.seekerWidth = event.nativeEvent.layout.width }
+                    onLayout={ event => {
+                        this.player.seekerWidth = event.nativeEvent.layout.width;
+                    }}
                 >
                     <View style={[
                         styles.seekbar.fill,
@@ -1277,6 +1324,9 @@ const styles = {
             fontSize: 11,
             textAlign: 'right',
         },
+        back: {
+            padding: '2%'
+        }
     }),
     volume: StyleSheet.create({
         container: {
@@ -1302,9 +1352,6 @@ const styles = {
             marginTop: -24,
             marginLeft: -24,
             padding: 16,
-        },
-        icon: {
-            marginLeft:7
         }
     }),
     seekbar: StyleSheet.create({
@@ -1328,16 +1375,17 @@ const styles = {
         },
         handle: {
             position: 'absolute',
-            marginLeft: -7,
-            height: 28,
-            width: 28,
+            marginLeft: -20,
+            marginTop: -6,
+            height: 48,
+            width: 48,
         },
         circle: {
             borderRadius: 12,
             position: 'relative',
             top: 8, left: 8,
-            height: 12,
-            width: 12,
+            height: 24,
+            width: 24,
         },
     })
 };
